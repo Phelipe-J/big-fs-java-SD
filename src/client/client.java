@@ -42,7 +42,7 @@ public class client{
                 return;
             }
 
-            String[] remotePath = destinationPath.split(":\\\\");       // Separa a raiz do resto do endereço
+            String[] remotePath = destinationPath.split(":\\\\", -1);       // Separa a raiz do resto do endereço
 
             File file = new File(sourcePath);
             if(file.isDirectory()){
@@ -119,7 +119,7 @@ public class client{
 
             String fullFilePath = remotePath + "\\" + file.getName();
 
-            System.out.println("Full file path: " + fullFilePath);
+            System.out.println("Full server file path: " + fullFilePath);
 
             stub.beginUpload(fullFilePath);
 
@@ -127,7 +127,9 @@ public class client{
                 stub.uploadBlock(fullFilePath, buffer, bytesRead);
             }
 
-            stub.endUpload(fullFilePath);
+            long fileSize = file.length();
+
+            stub.endUpload(fullFilePath, fileSize);
             in.close();
         }
         catch(Exception e){
@@ -346,7 +348,7 @@ public class client{
         try{
             
             Registry registry = LocateRegistry.getRegistry("26.21.150.179", 1099);
-            functions stub = (functions) registry.lookup("server_functions");
+            functions stub = (functions) registry.lookup("ClientService");
             
             mainLoop(stub);
         }

@@ -9,7 +9,7 @@ public interface functions extends Remote{
     
     public void beginUpload(String fileName) throws RemoteException;
     public void uploadBlock(String fileName, byte[] block, int length) throws RemoteException;
-    public void endUpload(String fileName) throws RemoteException;
+    public void endUpload(String fileName, long fileSize) throws RemoteException;
 
     public byte[] download(String filePath, long offset, int fileSize) throws RemoteException;
     public long downloadFileSize(String filePath) throws RemoteException;
@@ -21,4 +21,6 @@ public interface functions extends Remote{
     public boolean createFolder(String folderName) throws RemoteException;
     public boolean inFolder(String folderPath) throws RemoteException;
     public boolean backFolder() throws RemoteException;
+
+    public int getServer_ID() throws RemoteException;
 }

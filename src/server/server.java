@@ -3,26 +3,79 @@ package server;
 import java.rmi.RemoteException;
 import java.rmi.registry.*;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import javax.management.monitor.Monitor;
 
 import functions.functions;
+import functions.monitor_interface;
 
 public class server implements functions{
 
-    private static final String rootFolderPath = "S:\\Sistemas_Distribuidos\\rmi\\server\\";
-    private File rootFolder = new File(rootFolderPath);
-    private File currentFolder = rootFolder;
-    //private String currentPath = rootFolderPath;
+    private static final String basePath = "S:\\Sistemas_Distribuidos\\rmi\\server\\";
+
+    private String rootFolderPath;
+    private File rootFolder;
+    private File currentFolder;
+
     private Map<String, FileOutputStream> fileOutStreams = new HashMap<>();
+    private static int server_ID; 
+
+    public server(int id){
+        this.rootFolderPath = basePath+ id + File.separator;
+        this.rootFolder = new File(this.rootFolderPath);
+        this.currentFolder = this.rootFolder;
+
+        if(!this.rootFolder.exists()){
+            boolean created = this.rootFolder.mkdirs();
+
+            if(created){
+                System.out.println("Diretório do servidor [" + id + "] criado.");
+            }
+            else{
+                System.err.println("ERRO: Diretório do servidor não foi possível de ser criado.");
+            }
+        }
+    }
+
+    // Controle do servidor
+    public int getServer_ID() throws RemoteException {
+        return server_ID;
+    }
+
+    private void startHeartbeatService(monitor_interface monitorStub) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Runnable heartbeatTask = () -> {
+            try {
+                File rootDir = new File(rootFolderPath);
+                long totalSpace = rootDir.getTotalSpace();
+                long freeSpace = rootDir.getFreeSpace();
+                long usedSpace = totalSpace - freeSpace;
+
+                float workload = 0.0f; // Placeholder for workload calculation
+
+                serverInfo status = new serverInfo(server_ID, totalSpace, usedSpace, workload);
+                status.setLastHeartbeatTimestamp(System.currentTimeMillis());
+
+                monitorStub.sendHeartbeat(status);
+                System.out.println("Heartbeat enviado: " + status);
+            }
+            catch (Exception e) {
+                System.err.println("Ocorreu um erro inesperado na tarefa de heartbeat: " + e.getMessage());
+            }
+        };
+        scheduler.scheduleAtFixedRate(heartbeatTask, 10, 300, TimeUnit.SECONDS);
+    }
 
 
+
+    // Requisições do cliente
     public String[] list(){
         //File folder = new File(rootFolderPath);
         File[] files = currentFolder.listFiles();
@@ -66,7 +119,7 @@ public class server implements functions{
         }
     }
 
-    public void endUpload(String fileName){
+    public void endUpload(String fileName, long fileSize){
         try{
             FileOutputStream fos = fileOutStreams.remove(fileName);
             if (fos != null) {
@@ -143,42 +196,42 @@ public class server implements functions{
         return file.isDirectory();
     }
 
-    public boolean delete(String filePath) throws RemoteException{
-        try{
-            String[] folders = filePath.split(":\\\\");
+    public boolean delete(String relativePath) throws RemoteException{
+        try {
+            File fileToDelete = new File(this.rootFolder, relativePath);
 
-            File file;
-
-            if(folders.length == 2){        // Passado caminho inteiro desde a raiz
-                file = new File(rootFolderPath + folders[1]);
-            }
-            else{
-                file = new File(currentFolder, filePath);
+            if (!fileToDelete.exists()) {
+                System.out.println("[Delete] Arquivo não encontrado para exclusão: " + fileToDelete.getAbsolutePath() + ". Considerado sucesso.");
+                return true; // Se o arquivo já não existe, a operação teve o efeito desejado.
             }
 
-            
-            if(file.delete()){
+            if (fileToDelete.delete()) {
+                System.out.println("[Delete] Arquivo físico apagado: " + fileToDelete.getAbsolutePath());
                 return true;
             }
-            return false;
+            else {
+                System.err.println("[Delete] Falha ao apagar o arquivo físico: " + fileToDelete.getAbsolutePath());
+                return false;
+            }
         }
-        catch(Exception e){
+        catch (Exception e) {
             e.printStackTrace();
-            throw new RemoteException("Erro ao deletar arquivo.", e);
+            return false;
         }
     }
 
-    public boolean createFolder(String folderName){
+    public boolean createFolder(String relativePath){
         try{
-            String[] folders = folderName.split(":\\\\");
+            File newFolder = new File(this.rootFolder, relativePath);
+            newFolder.mkdirs();
 
-            if(folders.length == 2){        // Passado caminho inteiro desde a raiz
-                new File(rootFolderPath + folders[1]).mkdirs();
+            if(newFolder.exists() && newFolder.isDirectory()){
+                return true;
             }
             else{
-                new File(currentFolder, folderName).mkdirs();
+                System.err.println("Falha ao criar estrutura de diretório.");
+                return false;
             }
-            return true;
         }
         catch(Exception e){
             e.printStackTrace();
@@ -188,7 +241,7 @@ public class server implements functions{
 
     public boolean inFolder(String folderPath){
         try{
-            String[] folders = folderPath.split(":\\\\");
+            String[] folders = folderPath.split(":\\");
 
             File folder;
 
@@ -235,13 +288,32 @@ public class server implements functions{
 
     public static void main(String[] args){
         try{
+            if(args.length != 1){
+                System.out.println("Uso: java server.server <ID do servidor (0-9)>");
+                return;
+            }
+
+            server_ID = Integer.parseInt(args[0]);
+            if(server_ID < 0 || server_ID > 9){
+                System.out.println("ID do servidor deve ser entre 0 e 9.");
+                return;
+            }
             
             System.setProperty("java.rmi.server.hostname", "26.21.150.179");
-            server obj = new server();
-            functions stub = (functions) UnicastRemoteObject.exportObject((obj), 1100);
-            Registry registry = LocateRegistry.createRegistry(1099);
-            registry.rebind("server_functions", stub);
-            System.out.println("registro: " + registry.toString());
+            server obj = new server(server_ID);
+            // Porta dinamica para testes na mesma máquina
+            functions stub = (functions) UnicastRemoteObject.exportObject((obj), 1100 + server_ID); 
+            //Registry registry = LocateRegistry.createRegistry(1099);
+            Registry registry = LocateRegistry.getRegistry("26.21.150.179", 1099);
+            registry.rebind("server_functions_" + server_ID, stub);
+
+            monitor_interface monitor = (monitor_interface) registry.lookup("MonitorService");
+            monitor.registerServer(obj, server_ID);
+
+            obj.startHeartbeatService(monitor);
+
+            //System.out.println("registro: " + registry.toString());
+            System.out.println("Servidor registrado com ID: " + server_ID);
             System.out.println("Servidor Pronto.");
         }
         catch(Exception e){
