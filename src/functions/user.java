@@ -1,10 +1,9 @@
 package functions;
 
 import java.io.Serializable;
-import java.util.List;
 
 public class user implements Serializable {
-    private static final long seriaVersionUID = 5L;
+    private static final long serialVersionUID = 5L;
     private String username;
     private String password;
     private folder rootDir;
@@ -12,8 +11,6 @@ public class user implements Serializable {
     public user(String username, String password){
         this.username = username;
         this.password = password;
-
-        this.rootDir = new folder(username, username, null);
     }
 
     public String getUsername(){
@@ -22,6 +19,10 @@ public class user implements Serializable {
 
     public String getPassword(){
         return password;
+    }
+
+    public void setRootDir(folder root){
+        this.rootDir = root;
     }
 
     public folder getRootDir(){

@@ -1,7 +1,6 @@
 package functions;
 
 import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.List;
 
 public class file implements Serializable {
@@ -54,6 +53,7 @@ public class file implements Serializable {
         this.parentFolder = parentFolder;
     }
 
+    // TODO: Adicionar fragmentação de arquivos
     /*
     public void addBlockLocation(int index, int node) {
         if(replicaServerIds.get(index) == null){

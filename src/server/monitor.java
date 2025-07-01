@@ -3,10 +3,7 @@ package server;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.InvalidClassException;
-import java.io.ObjectInput;
 import java.io.ObjectInputStream;
-import java.io.ObjectOutput;
 import java.io.ObjectOutputStream;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
@@ -15,24 +12,28 @@ import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collector;
 import java.util.stream.Collectors;
 
+import javax.security.auth.login.LoginException;
+
+import client.clientServices;
+import functions.authenticationService;
 import functions.file;
 import functions.folder;
-import functions.functions;
-import functions.monitor_interface;
-import server.server;
+import functions.monitorServices;
+import functions.serverServices;
+import functions.user;
 
-public class monitor implements functions, monitor_interface {
+public class monitor implements monitorServices, authenticationService {
     
     private static final double WEIGHT_SPACE = 0.7; // Peso para o espaço livre
     private static final double WEIGHT_WORKLOAD = 0.3; // Peso para a carga de trabalho
@@ -42,26 +43,47 @@ public class monitor implements functions, monitor_interface {
     private static final int MAX_RETRIES = 10; // Número máximo de tentativas para operações
     private static final long RETRY_INTERVAL_MS = 1000; // Tempo de espera entre tentativas em milissegundos
 
-    private static final String PERSISTENCE_FILE = "S:\\Sistemas_Distribuidos\\rmi\\monitor\\monitor_fs.dat";
-    private static folder fileSystemRoot = new folder("root", "", null);
-    private static folder currentClientDirectory;
+    private static final String PERSISTENCE_FILES = "S:\\Sistemas_Distribuidos\\rmi\\monitor\\";
+    private static final String USERS_DB_FILE = "S:\\Sistemas_Distribuidos\\rmi\\monitor\\db\\users.db.dat";
+    private Map<String, user> userDatabase = new ConcurrentHashMap<>();
+    private Map<String, user> loggedInUsers = new ConcurrentHashMap<>();
 
-    private static Map<Integer, functions> serverStubs = new HashMap<>();
-    private static Map<Integer, serverInfo> serverStatusMap = new HashMap<>();
+    private static Map<Integer, serverServices> serverStubs = new ConcurrentHashMap<>();
+    private static Map<Integer, serverInfo> serverStatusMap = new ConcurrentHashMap<>();
 
-    private static Map<String, List<functions>> uploadSessions = new HashMap<>();
+    private static Map<String, List<serverServices>> uploadSessions = new ConcurrentHashMap<>();
 
     public monitor() {
-        loadState();    // Carrega registros de arquivos do arquivo de estados
-        currentClientDirectory = fileSystemRoot;
+        loadUsers();
+
         startHeartbeatMonitor();    // Inicia o monitoramento de heartbeat dos servidores
     }
 
     // Monitor Methods
 
-    public void registerServer(functions server, int ID) throws RemoteException {
+    public void registerServer(serverServices server, int ID, Set<String> serverManifest) throws RemoteException {
         serverStubs.put(ID, server);
         System.out.println("Servidor registrado: " + ID);
+
+        // Criação de pastas de usuário
+
+        loadUsers();
+        if(userDatabase != null && !userDatabase.isEmpty()){
+            for(String username : userDatabase.keySet()){
+                try{
+                    server.createFolder(username);
+                }
+                catch(Exception e){
+                    System.err.println("Falha ao criar pasta para o usuário: " + username);
+                }
+            }
+        }
+
+        synchronizeServerState(ID, server, serverManifest);
+    }
+
+    private void synchronizeServerState(int serverId, serverServices serverStub, Set<String> serverManifest){
+        //TODO: Fazer sistema de comparar arquivos e corrigir inconsistências
     }
 
     public void sendHeartbeat(serverInfo status) throws RemoteException {
@@ -76,7 +98,7 @@ public class monitor implements functions, monitor_interface {
         }
     }
 
-    private List<functions> selectBestServers(int count, List<Integer> candidateIds) throws RemoteException{
+    private List<serverServices> selectBestServers(int count, List<Integer> candidateIds) throws RemoteException{
         List<serverInfo> availableCandidates = new ArrayList<>();
 
         for(int id : candidateIds){
@@ -98,7 +120,7 @@ public class monitor implements functions, monitor_interface {
                 .collect(Collectors.toList());
     }
 
-    private List<functions> selectBestServers(int count) throws RemoteException {   // Sobrecarga da função acima, para pesquisar entre todos os servidores
+    private List<serverServices> selectBestServers(int count) throws RemoteException {   // Sobrecarga da função acima, para pesquisar entre todos os servidores
         List<Integer> allServerIds = new ArrayList<>(serverStatusMap.keySet());
 
         return selectBestServers(count, allServerIds);
@@ -129,11 +151,17 @@ public class monitor implements functions, monitor_interface {
                     if (currentTime - status.getLastHeartbeatTimestamp() > T_TIMEOUT) {
                         System.out.println("Servidor " + status.getServer_ID() + " está offline.");
                         status.setAvailable(false);
+
+                        initiateReplicaCorrection(status.getServer_ID());
                     }
                 }
             }
         };
         scheduler.scheduleAtFixedRate(heartbeatTask, 2, 2, TimeUnit.MINUTES);
+    }
+
+    private void initiateReplicaCorrection(int deadServerId){
+        //TODO: implementar lógica para cópia de réplicas
     }
 
     @FunctionalInterface
@@ -159,10 +187,6 @@ public class monitor implements functions, monitor_interface {
             }
         }
         throw new RemoteException("Ação falhou após " + MAX_RETRIES + " tentativas.", lastException);
-    }
-
-    public int getServer_ID(){
-        throw new UnsupportedOperationException("Essa operação não deve ser chamada no monitor.");  // Monitor não é servidor, não tem ID, essa função não deve ser chamada
     }
 
     // Virtual File System Methods
@@ -197,40 +221,28 @@ public class monitor implements functions, monitor_interface {
         return path.trim().split("[/\\\\]+");
     }
 
-    private folder findFolderByPath(String path){
-        folder curretFolder = fileSystemRoot;
-
-        if(path == null || path.isEmpty()){
-            return curretFolder;
+    private folder findFolderByPath(folder startingFolder, String path){
+        if(path == null || path.trim().isEmpty()){
+            return startingFolder;
         }
 
-        String[] parts = path.split("[/\\\\]+");
+        folder currentLevel = startingFolder;
+        String[] parts = getPathParts(path);
 
         for(String part: parts){
-            if(part.isEmpty()) continue;
-
-            folder nextFolder = null;
-
-            // Procura subpasta
-            for(folder sub : curretFolder.getSubFolders()){
+            folder nextLevel = null;
+            for(folder sub : currentLevel.getSubFolders()){
                 if(sub.getFolderName().equalsIgnoreCase(part)){
-                    nextFolder = sub;
+                    nextLevel = sub;
                     break;
                 }
             }
-
-            // Cria subpasta
-            if(nextFolder == null){
-                String newPath = curretFolder.getFolderPath().isEmpty() ? part : curretFolder.getFolderPath() + "\\" + part;
-                nextFolder = new folder(part, newPath, curretFolder);
-                curretFolder.addSubFolder(nextFolder);
-                System.out.println("Pasta lógica criada: " + newPath);
-            }
+            if(nextLevel == null) return null; // Pasta não encontrada
         }
-        return curretFolder;
+        return currentLevel;
     }
 
-    private file findFileByPath(String path){
+    private file findFileByPath(folder userRoot, String path){
 
         String filePath = path.replace('/', '\\');
         String parentPath = "";
@@ -242,25 +254,13 @@ public class monitor implements functions, monitor_interface {
             fileName = filePath.substring(lastSeparator + 1);
         }
 
-        folder currentLevel = fileSystemRoot;
-        String[] parts = parentPath.split("\\\\");
+        folder parentFolder = findFolderByPath(userRoot, parentPath);
 
-        if(!parentPath.isEmpty()){
-            for(String part: parts){
-                folder nextLevel = null;
-                for(folder sub : currentLevel.getSubFolders()){
-                    if(sub.getFolderName().equalsIgnoreCase(part)){
-                        nextLevel = sub;
-                        break;
-                    }
-                }
-                if(nextLevel == null) return null; // Caminho não encontrado
-                currentLevel = nextLevel;
-            }
+        if(parentFolder == null){
+            return null;
         }
 
-        // Na pasta de destino
-        for(file f: currentLevel.getFiles()){
+        for(file f : parentFolder.getFiles()){
             if(f.getFileName().equalsIgnoreCase(fileName)){
                 return f;
             }
@@ -269,65 +269,134 @@ public class monitor implements functions, monitor_interface {
         return null;
     }
 
-    private void saveState(){
-        try (FileOutputStream fos = new FileOutputStream(PERSISTENCE_FILE); ObjectOutputStream oos = new ObjectOutputStream(fos)){
-            oos.writeObject(fileSystemRoot);
-            System.out.println("Registro salvo.");
+    // Client Methods
+
+    private void saveUsers(){
+        try (FileOutputStream fos = new FileOutputStream(USERS_DB_FILE); ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+            oos.writeObject(userDatabase);
         }
         catch(Exception e){
-            System.err.println("Erro ao salvar registro.");
-        }
-    }
-
-    private void loadState() {
-    File stateFile = new File(PERSISTENCE_FILE);
-    if (stateFile.exists()) {
-        try (FileInputStream fis = new FileInputStream(stateFile);
-             ObjectInputStream ois = new ObjectInputStream(fis)) {
-            
-            fileSystemRoot = (folder) ois.readObject();
-            rebuildTransientLinks(fileSystemRoot);
-            System.out.println("Estado do sistema de arquivos carregado com sucesso de " + PERSISTENCE_FILE);
-
-        } catch (InvalidClassException | ClassNotFoundException e) {
-            // Erro específico quando a classe mudou ou não foi encontrada
-            System.err.println("ERRO: O arquivo de estado '" + PERSISTENCE_FILE + "' é incompatível com a versão atual do programa.");
-            System.err.println("Isso geralmente acontece após uma atualização de código. Apague o arquivo e reinicie o monitor.");
-            System.err.println("Detalhes do erro: " + e.getMessage());
-            // Inicia com um sistema de arquivos vazio para evitar travar
-            fileSystemRoot = new folder("root", "", null);
-
-        } catch (Exception e) {
-            // Captura qualquer outro erro de leitura
-            System.err.println("ERRO desconhecido ao ler o arquivo de estado.");
+            System.err.println("Erro ao salvar usuários");
             e.printStackTrace();
-            fileSystemRoot = new folder("root", "", null);
         }
-    } else {
-        System.out.println("Nenhum arquivo de estado encontrado. Iniciando com um sistema de arquivos novo.");
-        saveState();
-        fileSystemRoot = new folder("root", "", null);
     }
-}
 
+    private void loadUsers(){
+        File dbFile = new File(USERS_DB_FILE);
+
+        if(dbFile.exists()){
+            try (FileInputStream fis = new FileInputStream(dbFile); ObjectInputStream ois = new ObjectInputStream(fis)){
+                this.userDatabase = (Map<String, user>) ois.readObject();
+            }
+            catch (Exception e){
+                System.err.println("Erro ao carregar usuários");
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void saveUserFileSystem(user aUser){
+        try (FileOutputStream fos = new FileOutputStream(PERSISTENCE_FILES + aUser.getUsername() + ".dat"); ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+            oos.writeObject(aUser.getRootDir());
+            System.out.println("Registrodo usuário " + aUser.getUsername() + " salvo.");
+        }
+        catch(Exception e){
+            System.err.println("Erro ao salvar arquivo de estado do usuário");
+            e.printStackTrace();
+        }
+    }
+
+    private folder loadUserFileSystem(user aUser){
+        File userStateFile = new File(PERSISTENCE_FILES + aUser.getUsername() + ".dat");
+        if(userStateFile.exists()){
+            try (FileInputStream fis = new FileInputStream(userStateFile); ObjectInputStream ois = new ObjectInputStream(fis)) {
+                folder userRoot = (folder) ois.readObject();
+                rebuildTransientLinks(userRoot);
+                System.out.println("Sistema de arquivos carregado do usuário: " + aUser.getUsername());
+                return userRoot;
+            }
+            catch(Exception e){
+                System.err.println("Erro ao carregar os arquivos do usuário: " + aUser.getUsername());
+                e.printStackTrace();
+                return null;
+            }
+        }
+        return null; // arquivo não existe
+    }
+
+    public void registerUser(String username, String password){
+        if(username == null || username.trim().isEmpty() || password == null || password.isEmpty()){
+            throw new IllegalArgumentException("Usuario e/ou senha não podem ser vazios.");
+        }
+
+        if(userDatabase.containsKey(username)){
+            throw new IllegalArgumentException("Este usuário já existe");
+        }
+
+        user newUser = new user(username, password);
+        userDatabase.put(username, newUser);
+        System.out.println("Novo usuario registrado: " + username);
+
+        folder newUserRoot = new folder(newUser.getUsername(), "", null);
+        newUser.setRootDir(newUserRoot);
+
+        saveUsers();
+        saveUserFileSystem(newUser);
+
+        String userRootPath = newUser.getUsername();
+
+        for(serverServices server : serverStubs.values()){
+            try{
+                server.createFolder(userRootPath);
+            }
+            catch(RemoteException e){
+                System.err.println(("Falha ao criar pasta raiz de " + username + " em um dos servers"));
+            }
+        }
+    }
+
+    public clientServices login(String username, String password) throws LoginException, RemoteException{
+
+        user registeredUser = userDatabase.get(username);
+
+        if(registeredUser == null){
+            throw new LoginException("Usuario não encontrado.");
+        }
+        if(!registeredUser.getPassword().equals(password)){
+            throw new LoginException("Senha incorreta.");
+        }
+
+        folder userRoot = loadUserFileSystem(registeredUser);
+        if(userRoot == null){
+            System.out.println("isso não deveria acontecer de jeito nenhum");
+            userRoot = new folder(username, "", null);
+        }
+
+        registeredUser.setRootDir(userRoot);
+        loggedInUsers.put(username, registeredUser);
+
+        return new clientSession(registeredUser, this);
+    }
 
     // Server Methods
 
-    public void beginUpload(String fileName) throws RemoteException{
+    public void beginUpload(String fileName, user aUser) throws RemoteException{
         try {
             // Se já existe uma sessão para este arquivo, é um erro.
             if (uploadSessions.containsKey(fileName)) {
                 throw new RemoteException("Já existe um upload em andamento para o arquivo: " + fileName);
             }
 
-            List<functions> targetServers = selectBestServers(REPLICATION_FACTOR);
+            List<serverServices> targetServers = selectBestServers(REPLICATION_FACTOR);
             
             System.out.println("Iniciando upload de '" + fileName + "'. Servidores de destino selecionados.");
 
+            String pathInServer = aUser.getUsername() + "\\" + fileName;
+
             // Chama beginUpload em todo os servidores selecionados
-            for (functions server : targetServers) {
+            for (serverServices server : targetServers) {
                 try{
-                    executeWithRetry(() -> server.beginUpload(fileName));
+                    executeWithRetry(() -> server.beginUpload(pathInServer));
                 }
                 catch (RemoteException e) {
                     System.err.println("Erro ao iniciar upload no servidor " + server + ": " + e.getMessage());
@@ -345,28 +414,30 @@ public class monitor implements functions, monitor_interface {
         }
     }
 
-    public void uploadBlock(String fileName, byte[] block, int length) throws RemoteException{
+    public void uploadBlock(String fileName, byte[] block, int length, user aUser) throws RemoteException{
         // Recupera a lista de servidores da sessão
-        List<functions> targetServers = uploadSessions.get(fileName);
+        List<serverServices> targetServers = uploadSessions.get(fileName);
 
         // Se não houver sessão, o cliente não chamou beginUpload. É um erro.
         if (targetServers == null || targetServers.isEmpty()) {
             throw new RemoteException("Sessão de upload não encontrada para o arquivo: " + fileName + ". Chame beginUpload primeiro.");
         }
 
+        String pathInServer = aUser.getUsername() + "\\" + fileName;
+
         // Envia o bloco para todos os servidores da sessão
-        for (functions server : targetServers) {
+        for (serverServices server : targetServers) {
             try {
-                executeWithRetry(() -> server.uploadBlock(fileName, block, length));
+                executeWithRetry(() -> server.uploadBlock(pathInServer, block, length));
             } catch (RemoteException e) {
                 System.err.println("Falha ao enviar bloco para um dos servidores durante o upload de " + fileName + ". " + e.getMessage());
             }
         }
     }
 
-    public void endUpload(String fileName, long fileSize) throws RemoteException{
+    public void endUpload(String fileName, long fileSize, user aUser) throws RemoteException{
         // Recupera a lista de servidores da sessão
-        List<functions> targetServers = uploadSessions.get(fileName);
+        List<serverServices> targetServers = uploadSessions.get(fileName);
 
         if (targetServers == null || targetServers.isEmpty()) {
             throw new RemoteException("Sessão de upload não encontrada para finalizar: " + fileName);
@@ -374,10 +445,12 @@ public class monitor implements functions, monitor_interface {
 
         System.out.println("Finalizando upload para: " + fileName);
         
+        String pathInServer = aUser.getUsername() + "\\" + fileName;
+
         // Envia o sinal de finalização para todos os servidores da sessão
-        for (functions server : targetServers) {
+        for (serverServices server : targetServers) {
             try{
-                executeWithRetry(() -> server.endUpload(fileName, fileSize));
+                executeWithRetry(() -> server.endUpload(pathInServer));
                 System.out.println("Upload finalizado com sucesso no servidor: " + server);
             }
             catch (RemoteException e) {
@@ -389,9 +462,9 @@ public class monitor implements functions, monitor_interface {
         try{
             List<Integer> replicaIds = new ArrayList<>();
 
-            for(functions stub : targetServers){
+            for(serverServices stub : targetServers){
                 try{
-                    replicaIds.add(stub.getServer_ID());
+                    replicaIds.add(stub.getServerID());
                 }
                 catch(RemoteException e){
                     System.err.println("Falha ao obter ID de um servidor.");
@@ -410,14 +483,14 @@ public class monitor implements functions, monitor_interface {
                 justFileName = fileName.substring(lastSeparator + 1);
             }
 
-            folder destinationFolder = findFolderByPath(parentPath);
+            folder destinationFolder = findFolderByPath(aUser.getRootDir(), parentPath);
 
             file newFileInfo = new file(justFileName, fileName, fileSize, replicaIds);
             destinationFolder.addFile(newFileInfo);
 
             System.out.println("Arquivo \"" + newFileInfo.getFileName() + "foi salvo em: " + newFileInfo.getParentFolder().getFolderName() + ".");
 
-            saveState();
+            saveUserFileSystem(aUser);
 
             System.out.println("Arquivo " + justFileName + " registrado no monitor em " + destinationFolder.getFolderPath() + " .");
         }
@@ -431,8 +504,8 @@ public class monitor implements functions, monitor_interface {
         System.out.println("Sessão de upload para '" + fileName + "' encerrada e limpa.");
     }
 
-    public byte[] download(String filePath, long offset, int blockSize) throws RemoteException{
-        file fileInfo = findFileByPath(filePath);
+    public byte[] download(String filePath, long offset, int blockSize, user aUser) throws RemoteException{
+        file fileInfo = findFileByPath(aUser.getRootDir(), filePath);
 
         if(fileInfo == null){
             throw new RemoteException("Arquivo não encontrado: " + filePath);
@@ -443,19 +516,20 @@ public class monitor implements functions, monitor_interface {
             throw new RemoteException("Nenhuma réplica encontrada para o arquivo: " + filePath + ". O arquivo está corrompido no sistema.");
         }
 
-        List<functions> bestServerList = selectBestServers(1, replicaServerIds);
+        List<serverServices> bestServerList = selectBestServers(1, replicaServerIds);
 
         if(bestServerList.isEmpty()){
             throw new RemoteException("Nenhum servidor com réplica do arquivo '" + filePath + "' está disponível no momento.");
         }
 
-        functions bestServerStub = bestServerList.get(0);
+        serverServices bestServerStub = bestServerList.get(0);
 
-        return bestServerStub.download(filePath, offset, blockSize);
+        String pathInServer = aUser.getUsername() + "\\" + filePath;
+        return bestServerStub.download(pathInServer, offset, blockSize);
     }
 
-    public long downloadFileSize(String filePath) throws RemoteException{
-        file fileInfo = findFileByPath(filePath);
+    public long downloadFileSize(String filePath, user aUser) throws RemoteException{
+        file fileInfo = findFileByPath(aUser.getRootDir(), filePath);
         if(fileInfo != null){
             return fileInfo.getFileSize();
         }
@@ -464,16 +538,16 @@ public class monitor implements functions, monitor_interface {
         throw new RemoteException("Arquivo não encontrado: " + filePath);
     }
 
-    public boolean isFolder(String filePath) throws RemoteException{
+    public boolean isFolder(String filePath, user aUser) throws RemoteException{
         throw new UnsupportedOperationException("Essa operação ainda não foi feita.");
     }
 
-    public List<String> listFolderFiles(String folderPath) throws RemoteException{
+    public List<String> listFolderFiles(String folderPath, user aUser) throws RemoteException{
         throw new UnsupportedOperationException("Essa operação ainda não foi feita.");
     }
 
-    public boolean delete(String filePath) throws RemoteException{
-        file fileToDelete = findFileByPath(filePath);
+    public boolean delete(String filePath, user aUser) throws RemoteException{
+        file fileToDelete = findFileByPath(aUser.getRootDir(), filePath);
 
         System.out.println("Path dado:" + filePath);
         System.out.println("Arquivo encontrado: " + fileToDelete);
@@ -485,11 +559,13 @@ public class monitor implements functions, monitor_interface {
         List<Integer> replicaServerIds = fileToDelete.getReplicaServerIds();
         int sucessCount = 0;
 
+        String pathInServer = aUser.getUsername() + "\\" + fileToDelete.getFilePath();
+
         for(int serverId : replicaServerIds){
-            functions serverStub = serverStubs.get(serverId);
+            serverServices serverStub = serverStubs.get(serverId);
             if(serverStub != null){
                 try{
-                    executeWithRetry(() -> serverStub.delete(fileToDelete.getFilePath()));
+                    executeWithRetry(() -> serverStub.delete(pathInServer));
                     sucessCount++;
                 }
                 catch(Exception e){
@@ -503,17 +579,17 @@ public class monitor implements functions, monitor_interface {
             parentFolder.getFiles().remove(fileToDelete);
         }
 
-        saveState();
+        saveUserFileSystem(aUser);
         return true;
     }
 
-    public boolean createFolder(String folderPath) throws RemoteException{
+    public boolean createFolder(String folderPath, user aUser) throws RemoteException{
         if (folderPath == null || folderPath.trim().isEmpty()) {
             System.err.println("Tentativa de criar pasta com nome vazio.");
             return false;
         }
     
-        folder parentFolder = currentClientDirectory;
+        folder parentFolder = aUser.getRootDir();
         folder targetFolder = null;
 
         String[] parts = getPathParts(folderPath);
@@ -540,7 +616,7 @@ public class monitor implements functions, monitor_interface {
             parentFolder = targetFolder;
         }
     
-        String finalPathToCreate = targetFolder.getFolderPath();
+        String finalPathToCreate = aUser.getUsername() + "\\" + targetFolder.getFolderPath();
         int successCount = 0;
 
         if (serverStubs.isEmpty()) {
@@ -548,7 +624,7 @@ public class monitor implements functions, monitor_interface {
             successCount = 1;
         }
         else {
-            for (functions serverStub : serverStubs.values()) {
+            for (serverServices serverStub : serverStubs.values()) {
                 try {
                     executeWithRetry(() -> serverStub.createFolder(finalPathToCreate));
                     successCount++;
@@ -559,54 +635,13 @@ public class monitor implements functions, monitor_interface {
         }
 
         if (successCount > 0) {
-            saveState();
+            saveUserFileSystem(aUser);
             return true;
         }
         else {
             System.err.println("ERRO: Nenhum servidor conseguiu criar a pasta física.");
             return false;
         }
-    }
-
-    public boolean inFolder(String folderName) throws RemoteException{
-        for(folder sub : currentClientDirectory.getSubFolders()){
-            if(sub.getFolderName().equalsIgnoreCase(folderName)){
-                currentClientDirectory = sub;
-                return true;
-            }
-        }
-        System.out.println("Pasta não encontrada.");
-        return false;
-    }
-
-    public boolean backFolder() throws RemoteException{
-        if(currentClientDirectory.getParentFolder() != null){
-            currentClientDirectory = currentClientDirectory.getParentFolder();
-            return true;
-        }
-        System.out.println("Nao foi possivel voltar.");
-        return false;
-    }
-
-    public String[] list() throws RemoteException {
-        if(currentClientDirectory == null){
-            return new String[]{"Erro: diretório atual não inicializado."};
-        }
-
-        List<folder> subFolders = currentClientDirectory.getSubFolders();
-        List<file> files = currentClientDirectory.getFiles();
-
-        String[] result = new String[subFolders.size() + files.size()];
-        int index = 0;
-
-        for (folder f : subFolders){
-            result[index++] = "[DIR] " + f.getFolderName();
-        }
-        for(file f : files){
-            result[index++] = "[ARQ] " + f.getFileName();
-        }
-
-        return result;
     }
 
     public static void main(String[] args){
@@ -616,14 +651,11 @@ public class monitor implements functions, monitor_interface {
 
             monitor obj = new monitor();
 
-            //functions clientStub = (functions) UnicastRemoteObject.exportObject((obj), 1101);
-            //monitor_interface serverStub = (monitor_interface) UnicastRemoteObject.exportObject((obj), 1102);
-
             Remote remoteStub = UnicastRemoteObject.exportObject(obj, 1101);
 
             Registry registry = LocateRegistry.createRegistry(1099);
             
-            registry.rebind("ClientService", remoteStub);
+            registry.rebind("AuthService", remoteStub);
             registry.rebind("MonitorService", remoteStub);
 
             System.out.println("Monitor iniciado.");

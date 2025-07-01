@@ -1,7 +1,5 @@
 package client;
 
-import functions.functions;
-
 import java.rmi.registry.*;
 import java.util.ArrayList;
 import java.util.Scanner;
@@ -9,14 +7,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+
+import functions.authenticationService;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.regex.*;
 import java.util.*;
 
-public class client{
-    public static void list(functions stub){
+public class client {
+    public static void list(clientServices stub){
         try{
             String[] files = stub.list();
             for(String print : files){
@@ -28,17 +29,18 @@ public class client{
         }
     }
 
-    public static void copy(functions stub, String sourcePath, String destinationPath){
+    public static void copy(clientServices stub, String sourcePath, String destinationPath){
         try{
             String[] addressPath = sourcePath.split(":\\\\");   // Separa a raiz do resto do endereço
 
+            // FIXME: Cópia de pastas inteiras
             if(addressPath[0].equals("remote")){            // Checa se é a raiz remota
                 if(stub.isFolder(addressPath[1])){
-                    downloadFolder(stub, addressPath[1], destinationPath);
+                    //downloadFolder(stub, addressPath[1], destinationPath);
                     return;
                 } 
                 String localFilePath = destinationPath + "\\" + sourcePath.substring(sourcePath.lastIndexOf("\\")+1);   // Pega o endereço local e junta com o nome do arquivo
-                download(stub, addressPath[1], localFilePath);
+                download(stub, sourcePath, localFilePath);
                 return;
             }
 
@@ -46,10 +48,10 @@ public class client{
 
             File file = new File(sourcePath);
             if(file.isDirectory()){
-                uploadFolder(stub, remotePath[1], file);
+                //uploadFolder(stub, remotePath[1], file);
             }
             else{
-                upload(stub, remotePath[1], sourcePath);
+                upload(stub, destinationPath, sourcePath);
             }
         }
         catch(Exception e){
@@ -57,7 +59,7 @@ public class client{
         }
     }
 
-    public static void download(functions stub, String remotePath, String localPath){
+    public static void download(clientServices stub, String remotePath, String localPath){
         try(FileOutputStream fos = new FileOutputStream(localPath)){
             long fileSize = stub.downloadFileSize(remotePath);
             long offset = 0;
@@ -75,7 +77,7 @@ public class client{
         }
     }
 
-    public static void downloadFolder(functions stub, String remotePath, String localPath){
+    public static void downloadFolder(clientServices stub, String remotePath, String localPath){
         try{
             String downloadRootName = remotePath.substring(remotePath.lastIndexOf("\\")+1);
             File downloadRoot = new File(localPath + "\\" + downloadRootName);              // Criar a pasta raiz sendo baixada
@@ -110,14 +112,14 @@ public class client{
         }
     }
 
-    public static void upload(functions stub, String remotePath, String localPath){
+    public static void upload(clientServices stub, String remotePath, String localPath){
         try{
             File file = new File(localPath);
             FileInputStream in = new FileInputStream(file);
             byte[] buffer = new byte[4096];
             int bytesRead = 0;
 
-            String fullFilePath = remotePath + "\\" + file.getName();
+            String fullFilePath = remotePath + file.getName();
 
             System.out.println("Full server file path: " + fullFilePath);
 
@@ -137,7 +139,7 @@ public class client{
         }
     }
 
-    public static void uploadFolder(functions stub, String remotePath, File folder){
+    public static void uploadFolder(clientServices stub, String remotePath, File folder){
         try{
             String newRemotePath = remotePath + "\\" + folder.getName();
             boolean folderResult = createFolder(stub, newRemotePath);
@@ -174,7 +176,7 @@ public class client{
 
     }
 
-    public static void delete(functions stub, String filePath){
+    public static void delete(clientServices stub, String filePath){
         try{
             boolean result = stub.delete(filePath);
             if(result == true){
@@ -189,7 +191,7 @@ public class client{
         }
     }
 
-    public static boolean createFolder(functions stub, String folderName){
+    public static boolean createFolder(clientServices stub, String folderName){
         try{
             System.out.println("Criar pasta em: " + folderName);
             boolean result = stub.createFolder(folderName);
@@ -208,7 +210,7 @@ public class client{
         }
     }
 
-    public static void backFolder(functions stub){
+    public static void backFolder(clientServices stub){
         try{
             stub.backFolder();
             list(stub);
@@ -218,7 +220,7 @@ public class client{
         }
     }
 
-    public static void inFolder(functions stub, String folderPath){
+    public static void inFolder(clientServices stub, String folderPath){
         try{
             stub.inFolder(folderPath);
             list(stub);
@@ -255,7 +257,7 @@ public class client{
         System.out.println("Encerra o programa.\n");
     }
 
-    private static void mainLoop(functions stub){
+    private static void mainLoop(clientServices stub){
         try{
             Scanner input = new Scanner(System.in);
         
@@ -346,14 +348,58 @@ public class client{
 
     public static void main(String[] args){
         try{
-            
             Registry registry = LocateRegistry.getRegistry("26.21.150.179", 1099);
-            functions stub = (functions) registry.lookup("ClientService");
-            
-            mainLoop(stub);
+            authenticationService authService = (authenticationService) registry.lookup("AuthService");
+
+            Scanner input = new Scanner(System.in);
+            clientServices userSessionStub = null;
+
+            while(userSessionStub == null){
+
+                System.out.println("register/login...");
+
+                String operation = input.nextLine();
+
+                switch (operation) {
+                    case "register":
+                        System.out.print("Usuário: ");
+                        String newUsername = input.nextLine();
+                        System.out.print("Senha: ");
+                        String newPassword = input.nextLine();
+                        try{
+                            authService.registerUser(newUsername, newPassword);
+                        }
+                        catch(Exception e){
+                            System.err.println("Erro no registro: " + e.getMessage());
+                        }
+                        break;
+
+                    case "login":
+                        System.out.print("Usuário: ");
+                        String username = input.nextLine();
+                        System.out.print("Senha: ");
+                        String password = input.nextLine();
+                        try{
+                            userSessionStub = authService.login(username, password);
+                            System.out.println("Login bem sucedido.");
+                        }
+                        catch(javax.security.auth.login.LoginException e){
+                            System.out.println(("Falha no login."));
+                        }
+                        break;
+                
+                    default:
+                        System.out.println("Comando invalido.");
+                        break;
+                }
+
+                
+            }
+
+            mainLoop(userSessionStub);
         }
         catch(Exception e){
-            e.printStackTrace();
+            System.err.println("Erro de conexão com o servidor: + " + e.getMessage());
         }
     }
 }

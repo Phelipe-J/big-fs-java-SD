@@ -4,25 +4,29 @@ import java.rmi.RemoteException;
 import java.rmi.registry.*;
 import java.rmi.server.UnicastRemoteObject;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.RandomAccessFile;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import javax.management.monitor.Monitor;
+import functions.monitorServices;
+import functions.serverServices;
 
-import functions.functions;
-import functions.monitor_interface;
-
-public class server implements functions{
+public class server implements serverServices{
 
     private static final String basePath = "S:\\Sistemas_Distribuidos\\rmi\\server\\";
+    private static final String MANIFEST_FILE = "manifest.dat";
+
+    private Set<String> localFileManifest = ConcurrentHashMap.newKeySet();
 
     private String rootFolderPath;
     private File rootFolder;
-    private File currentFolder;
 
     private Map<String, FileOutputStream> fileOutStreams = new HashMap<>();
     private static int server_ID; 
@@ -30,7 +34,6 @@ public class server implements functions{
     public server(int id){
         this.rootFolderPath = basePath+ id + File.separator;
         this.rootFolder = new File(this.rootFolderPath);
-        this.currentFolder = this.rootFolder;
 
         if(!this.rootFolder.exists()){
             boolean created = this.rootFolder.mkdirs();
@@ -42,14 +45,16 @@ public class server implements functions{
                 System.err.println("ERRO: Diretório do servidor não foi possível de ser criado.");
             }
         }
+
+        loadManifest();
     }
 
     // Controle do servidor
-    public int getServer_ID() throws RemoteException {
+    public int getServerID() throws RemoteException {
         return server_ID;
     }
 
-    private void startHeartbeatService(monitor_interface monitorStub) {
+    private void startHeartbeatService(monitorServices monitorStub) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         Runnable heartbeatTask = () -> {
             try {
@@ -73,28 +78,35 @@ public class server implements functions{
         scheduler.scheduleAtFixedRate(heartbeatTask, 10, 300, TimeUnit.SECONDS);
     }
 
+    public Set<String> getLocalFileManifest(){
+        return this.localFileManifest;
+    }
 
+    private void saveManifest(){
+        try (FileOutputStream fos = new FileOutputStream(rootFolderPath + MANIFEST_FILE); ObjectOutputStream oos = new ObjectOutputStream(fos)){
+            oos.writeObject(this.localFileManifest);
+        }
+        catch(Exception e){
+            System.err.println("Erro ao salvar o manifesto.");
+            e.printStackTrace();
+        }
+    }
 
-    // Requisições do cliente
-    public String[] list(){
-        //File folder = new File(rootFolderPath);
-        File[] files = currentFolder.listFiles();
-
-        String[] result = new String[files.length];
-
-        for(int i = 0; i < files.length; i++){
-            if(files[i].isFile()){
-                result[i] = "[ARQ] " + files[i].getName();
-                //System.out.println("Arq: " + files[i].getName());
+    private void loadManifest(){
+        File manifestFile = new File(rootFolderPath + MANIFEST_FILE);
+        if(manifestFile.exists()){
+            try (FileInputStream fis = new FileInputStream(manifestFile); ObjectInputStream ois = new ObjectInputStream(fis)){
+                this.localFileManifest = (Set<String>) ois.readObject();
             }
-            else if(files[i].isDirectory()){
-                result[i] = "[DIR] " + files[i].getName();
-                //System.out.println("Dir: " + files[i].getName());
+            catch(Exception e){
+                System.err.println("Erro ao carregar o manifesto.");
+                e.printStackTrace();
             }
         }
-
-        return result;
+        
     }
+
+    // Requisições do cliente
 
     public void beginUpload(String fileName){
         try{
@@ -119,11 +131,13 @@ public class server implements functions{
         }
     }
 
-    public void endUpload(String fileName, long fileSize){
+    public void endUpload(String fileName){
         try{
             FileOutputStream fos = fileOutStreams.remove(fileName);
             if (fos != null) {
                 fos.close();
+                localFileManifest.add(fileName);
+                saveManifest();
                 System.out.println("Upload concluído de: " + fileName);
             }
         }
@@ -156,57 +170,21 @@ public class server implements functions{
         }
     }
 
-    public long downloadFileSize(String filePath) throws RemoteException{
-        File file = new File(rootFolder, filePath);
-        if(!file.exists() || !file.isFile()) return -1;
-        return (long) file.length();
-    }
-
-    public List<String> listFolderFiles(String folderPath){
-        try{
-            List<String> fileList = new ArrayList<>();
-            File root = new File(rootFolder, folderPath);
-            int baseLen = root.getAbsolutePath().length()+1;
-
-            if(!root.exists() || !root.isDirectory()) return fileList;
-
-            listAllFiles(root, fileList, baseLen);
-
-            return fileList;
-        }
-        catch(Exception e){
-            e.printStackTrace();
-            return null;
-        }
-    }
-
-    private void listAllFiles(File dir, List<String> files, int baseLen){
-        for(File f: dir.listFiles()){
-            if(f.isDirectory()){
-                listAllFiles(f, files, baseLen);
-            }
-            else{
-                files.add(f.getAbsolutePath().substring(baseLen));
-            }
-        }
-    }
-
-    public boolean isFolder(String filePath){
-        File file = new File(rootFolderPath + filePath);
-        return file.isDirectory();
-    }
-
     public boolean delete(String relativePath) throws RemoteException{
         try {
             File fileToDelete = new File(this.rootFolder, relativePath);
 
             if (!fileToDelete.exists()) {
                 System.out.println("[Delete] Arquivo não encontrado para exclusão: " + fileToDelete.getAbsolutePath() + ". Considerado sucesso.");
+                localFileManifest.remove(relativePath);
+                saveManifest();
                 return true; // Se o arquivo já não existe, a operação teve o efeito desejado.
             }
 
             if (fileToDelete.delete()) {
                 System.out.println("[Delete] Arquivo físico apagado: " + fileToDelete.getAbsolutePath());
+                localFileManifest.remove(relativePath);
+                saveManifest();
                 return true;
             }
             else {
@@ -239,50 +217,28 @@ public class server implements functions{
         }
     }
 
-    public boolean inFolder(String folderPath){
-        try{
-            String[] folders = folderPath.split(":\\");
+    // Operações entre servidores
+    public void copyFileToPeer(String path, serverServices destinationPeer) throws RemoteException{
+        File fileToCopy = new File(this.rootFolder, path);
+        if(!fileToCopy.exists()){
+            throw new RemoteException("Arquivo de origem pra replicação não encontrado");
+        }
 
-            File folder;
+        try(FileInputStream in = new FileInputStream(fileToCopy)){
+            destinationPeer.beginUpload(path);
 
-            if(folders.length == 2){                                // Passado caminho inteiro desde a raiz
-                folder = new File(rootFolderPath + folders[1]);
-            }
-            else{
-                folder = new File(currentFolder, folderPath);
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while((bytesRead = in.read(buffer)) != -1){
+                destinationPeer.uploadBlock(path, buffer, bytesRead);
             }
 
-            
-            if(folder.exists()){
-                currentFolder = folder;
-            }
-            else{
-                return false;
-            }
-            
-            return true;
+            destinationPeer.endUpload(path);
+
+            System.out.println("Cópia de " + path + " para " + destinationPeer.getServerID() + " concluida.");
         }
         catch(Exception e){
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-    public boolean backFolder(){
-        try{
-            File parent = currentFolder.getParentFile();
-
-            if(parent != null && parent.getCanonicalPath().startsWith(rootFolder.getCanonicalPath())){
-                currentFolder = parent;
-            }
-            else{
-                return false;
-            }
-            return true;
-        }
-        catch(Exception e){
-            e.printStackTrace();
-            return false;
+            throw new RemoteException("Falha durante a cópia.");
         }
     }
 
@@ -302,13 +258,13 @@ public class server implements functions{
             System.setProperty("java.rmi.server.hostname", "26.21.150.179");
             server obj = new server(server_ID);
             // Porta dinamica para testes na mesma máquina
-            functions stub = (functions) UnicastRemoteObject.exportObject((obj), 1100 + server_ID); 
+            serverServices stub = (serverServices) UnicastRemoteObject.exportObject((obj), 1100 + server_ID); 
             //Registry registry = LocateRegistry.createRegistry(1099);
             Registry registry = LocateRegistry.getRegistry("26.21.150.179", 1099);
             registry.rebind("server_functions_" + server_ID, stub);
 
-            monitor_interface monitor = (monitor_interface) registry.lookup("MonitorService");
-            monitor.registerServer(obj, server_ID);
+            monitorServices monitor = (monitorServices) registry.lookup("MonitorService");
+            monitor.registerServer(stub, server_ID, obj.getLocalFileManifest());
 
             obj.startHeartbeatService(monitor);
 
