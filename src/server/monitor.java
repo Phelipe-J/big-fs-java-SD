@@ -674,25 +674,45 @@ public class monitor implements monitorServices, authenticationService {
     public byte[] download(String filePath, long offset, int blockSize, user aUser) throws RemoteException{
         file fileInfo = findFileByPath(aUser.getRootDir(), filePath);
 
-        if(fileInfo == null){
+        if (fileInfo == null) {
             throw new RemoteException("Arquivo não encontrado: " + filePath);
         }
 
         List<Integer> replicaServerIds = fileInfo.getReplicaServerIds();
-        if(replicaServerIds == null || replicaServerIds.isEmpty()){
+        if (replicaServerIds == null || replicaServerIds.isEmpty()) {
             throw new RemoteException("Nenhuma réplica encontrada para o arquivo: " + filePath + ". O arquivo está corrompido no sistema.");
         }
 
-        List<serverServices> bestServerList = selectBestServers(1, replicaServerIds);
+        List<serverServices> availableReplicaStubs = selectBestServers(replicaServerIds.size(), replicaServerIds);
 
-        if(bestServerList.isEmpty()){
+        if (availableReplicaStubs.isEmpty()) {
             throw new RemoteException("Nenhum servidor com réplica do arquivo '" + filePath + "' está disponível no momento.");
         }
 
-        serverServices bestServerStub = bestServerList.get(0);
-
         String pathInServer = aUser.getUsername() + "\\" + filePath;
-        return bestServerStub.download(pathInServer, offset, blockSize);
+
+        // Itera sobre cada servidor disponível, do melhor para o pior.
+        for (serverServices serverStub : availableReplicaStubs) {
+            try {
+                // Tenta baixar o bloco do servidor atual.
+                int serverId = serverStub.getServerID(); // Pega o ID para logs
+            
+                byte[] block = serverStub.download(pathInServer, offset, blockSize);
+            
+                return block;
+
+            } catch (RemoteException e) {
+                // Servidor falhou, vai ir pro próximo
+                try {
+                    System.err.println("AVISO: Falha ao baixar bloco do Servidor " + serverStub.getServerID() + ". Tentando o próximo servidor disponível...");
+                } catch (RemoteException idEx) {
+                    System.err.println("AVISO: Falha ao baixar bloco de um servidor que também falhou ao retornar seu ID. Tentando o próximo...");
+                }
+            }
+        }
+
+        // FALHA TOTAL: todos os servidores disponíveis falharam.
+        throw new RemoteException("Todas as réplicas disponíveis para o arquivo '" + filePath + "' falharam ao entregar o bloco solicitado.");
     }
 
     public long downloadFileSize(String filePath, user aUser) throws RemoteException{

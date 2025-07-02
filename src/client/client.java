@@ -10,6 +10,7 @@ import functions.authenticationService;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.RandomAccessFile;
 import java.util.regex.*;
 import java.util.*;
 
@@ -53,21 +54,62 @@ public class client {
         }
     }
 
-    public static void download(clientServices stub, String remotePath, String localPath){
-        try(FileOutputStream fos = new FileOutputStream(localPath)){
-            long fileSize = stub.downloadFileSize(remotePath);
-            long offset = 0;
+    public static void download(clientServices stub, String remotePath, String localPath) {
+        final int CHUNK_SIZE = 1 * 1024 * 1024; 
+        final int NUM_THREADS = 4;
 
-            while(offset < fileSize){
-                byte[] block = stub.download(remotePath, offset, 4096);
-                fos.write(block);
-                offset += block.length;
+        ExecutorService executor = Executors.newFixedThreadPool(NUM_THREADS);
+    
+        try {
+            long fileSize = stub.downloadFileSize(remotePath);
+            if (fileSize <= 0) {
+                System.out.println("Arquivo vazio ou não encontrado. Download cancelado.");
+                // Cria um arquivo vazio se o tamanho for 0
+                new FileOutputStream(localPath).close();
+                return;
             }
 
+            try (RandomAccessFile raf = new RandomAccessFile(localPath, "rw")) {
+                // Pré-aloca o espaço em disco para o arquivo final
+                raf.setLength(fileSize);
+            }
+
+            System.out.println("Iniciando download de '" + remotePath);
+
+         // Cria as tarefas de download para cada chunk
+            for (long offset = 0; offset < fileSize; offset += CHUNK_SIZE) {
+                final long currentOffset = offset;
+                final int currentBlockSize = (int) Math.min(CHUNK_SIZE, fileSize - currentOffset);
+
+                executor.submit(() -> {
+                    try {
+                        byte[] block = stub.download(remotePath, currentOffset, currentBlockSize);
+                    
+                        try (RandomAccessFile writer = new RandomAccessFile(localPath, "rw")) {
+                            synchronized (writer) {
+                                writer.seek(currentOffset); // Pula para a posição correta
+                                writer.write(block);        // Escreve o chunk
+                            }
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Falha ao baixar o chunk no offset: " + currentOffset);
+                        e.printStackTrace();
+                    }
+                });
+            }
+        
+            // Aguarda a finalização de todas as threads
+            executor.shutdown();
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
+
             System.out.println("Download Concluido.");
-        }
-        catch(Exception e){
-            e.printStackTrace();
+
+        } catch (Exception e) {
+         e.printStackTrace();
+        } finally {
+            if (!executor.isTerminated()) {
+                executor.shutdownNow(); // Força o desligamento em caso de erro
+            }
         }
     }
 
