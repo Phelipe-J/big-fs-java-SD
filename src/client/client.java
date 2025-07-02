@@ -1,12 +1,9 @@
 package client;
 
 import java.rmi.registry.*;
-import java.util.ArrayList;
-import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 import functions.authenticationService;
 
@@ -33,10 +30,11 @@ public class client {
         try{
             String[] addressPath = sourcePath.split(":\\\\");   // Separa a raiz do resto do endereço
 
-            // FIXME: Cópia de pastas inteiras
             if(addressPath[0].equals("remote")){            // Checa se é a raiz remota
-                if(stub.isFolder(addressPath[1])){
-                    //downloadFolder(stub, addressPath[1], destinationPath);
+                String remotefilePath = (addressPath.length > 1) ? addressPath[1]: "";
+
+                if(stub.isFolder(sourcePath)){
+                    downloadFolder(stub, sourcePath, destinationPath);
                     return;
                 } 
                 String localFilePath = destinationPath + "\\" + sourcePath.substring(sourcePath.lastIndexOf("\\")+1);   // Pega o endereço local e junta com o nome do arquivo
@@ -46,12 +44,14 @@ public class client {
 
             String[] remotePath = destinationPath.split(":\\\\", -1);       // Separa a raiz do resto do endereço
 
+            //String remoteDestination = (remotePath.length > 1) ? remotePath[1] : "";
+
             File file = new File(sourcePath);
             if(file.isDirectory()){
-                //uploadFolder(stub, remotePath[1], file);
+                uploadFolder(stub, destinationPath, file);
             }
             else{
-                upload(stub, destinationPath, sourcePath);
+                upload(stub, destinationPath + "\\" + file.getName(), sourcePath);
             }
         }
         catch(Exception e){
@@ -113,35 +113,42 @@ public class client {
     }
 
     public static void upload(clientServices stub, String remotePath, String localPath){
-        try{
+        try {
             File file = new File(localPath);
             FileInputStream in = new FileInputStream(file);
             byte[] buffer = new byte[4096];
-            int bytesRead = 0;
+            int bytesRead;
 
-            String fullFilePath = remotePath + file.getName();
+            System.out.println("Enviando '" + file.getName() + "' para o caminho remoto: " + remotePath);
 
-            System.out.println("Full server file path: " + fullFilePath);
-
-            stub.beginUpload(fullFilePath);
+            stub.beginUpload(remotePath);
 
             while((bytesRead = in.read(buffer)) != -1){
-                stub.uploadBlock(fullFilePath, buffer, bytesRead);
+                stub.uploadBlock(remotePath, buffer, bytesRead);
             }
 
             long fileSize = file.length();
-
-            stub.endUpload(fullFilePath, fileSize);
+            stub.endUpload(remotePath, fileSize);
             in.close();
         }
-        catch(Exception e){
+        catch(Exception e) {
             e.printStackTrace();
         }
     }
 
     public static void uploadFolder(clientServices stub, String remotePath, File folder){
         try{
-            String newRemotePath = remotePath + "\\" + folder.getName();
+            String newRemotePath;
+
+            if (remotePath.isEmpty()) {
+                
+                newRemotePath = folder.getName(); // Se o destino é a raiz, o caminho é apenas o nome da pasta.
+            }
+            else {
+                newRemotePath = remotePath + "\\" + folder.getName(); // Se já está numa subpasta, concatena.
+            }
+
+
             boolean folderResult = createFolder(stub, newRemotePath);
             if(folderResult == false){
                 return;
@@ -155,11 +162,10 @@ public class client {
                 executor.submit(() -> {
                     try{
                         if(file.isFile()){
-                            System.out.println("Caminho arquivo: " + file.getAbsolutePath());
-                            upload(stub, newRemotePath, file.getAbsolutePath());
+                            upload(stub, newRemotePath + "\\" + file.getName(), file.getAbsolutePath());
                         }
                         else if(file.isDirectory()){
-                            uploadFolder(stub, newRemotePath, file);
+                            uploadFolder(stub, newRemotePath + "\\" + file.getName(), file);
                         }
                     }
                     catch(Exception e){

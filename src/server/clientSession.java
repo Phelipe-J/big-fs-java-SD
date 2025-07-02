@@ -27,12 +27,15 @@ public class clientSession implements clientServices {
         String[] remotePath = clientPath.split(":\\\\");       // Separa a raiz do resto do endereço
 
         if(remotePath[0].equals("remote")){ // Raiz remota? ==> endereço completo
-            System.out.println("Path: " + remotePath[1]);
             return remotePath[1];
         }
         else{       // endereço relativo
-            System.out.println("Path: " + currentDirectory.getFolderPath() + "\\" + clientPath);
-            return currentDirectory.getFolderPath() + "\\" + clientPath;
+            if(currentDirectory.getFolderName().equals(currentUser.getRootDir().getFolderName())){
+                return clientPath;
+            }
+            else{
+                return currentDirectory.getFolderPath() + "\\" + clientPath;
+            }
         }
     }
 
@@ -103,12 +106,13 @@ public class clientSession implements clientServices {
     }
 
     public boolean isFolder(String filePath) throws RemoteException{
-        return false;
-        //throw new UnsupportedOperationException("Operação com pastas ainda não reimplementado.");
+        String trueFilePath = buildLogicalPath(filePath);
+        return mainMonitor.isFolder(trueFilePath, currentUser);
     }
 
     public List<String> listFolderFiles(String folderPath) throws RemoteException{
-        throw new UnsupportedOperationException("Operação com pastas ainda não reimplementado.");
+        String trueFilePath = buildLogicalPath(folderPath);
+        return mainMonitor.listFolderFiles(trueFilePath, currentUser);
     }
 
     public boolean delete(String filePath) throws RemoteException{

@@ -12,6 +12,8 @@ import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -82,8 +84,100 @@ public class monitor implements monitorServices, authenticationService {
         synchronizeServerState(ID, server, serverManifest);
     }
 
+    private Map<String, List<Integer>> buildMasterFileIndex(){
+        Map<String, List<Integer>> masterIndex = new HashMap<>();
+        File usersDir = new File(PERSISTENCE_FILES);
+        File[] userFiles = usersDir.listFiles((dir, name) -> name.endsWith(".dat"));
+
+        if (userFiles == null) return masterIndex;
+
+        for (File userFile : userFiles) {
+            String username = userFile.getName().replace(".dat", "");
+            try (FileInputStream fis = new FileInputStream(userFile);
+                ObjectInputStream ois = new ObjectInputStream(fis)) {
+            
+                folder userRoot = (folder) ois.readObject();
+                // Inicia a varredura recursiva para este usuário
+                traverseAndIndex(userRoot, username, masterIndex);
+            } catch (Exception e) {
+                System.err.println("Falha ao ler o arquivo de estado para o usuário " + username + " ao construir o índice mestre.");
+            }
+        }
+        return masterIndex;
+    }
+
+    private void traverseAndIndex(folder currentFolder, String username, Map<String, List<Integer>> index){
+        for(file f : currentFolder.getFiles()){
+            String physicalPath = username + "\\" + f.getFilePath();
+            index.put(physicalPath, f.getReplicaServerIds());
+        }
+        
+        for(folder sub : currentFolder.getSubFolders()){
+            traverseAndIndex(sub, username, index);
+        }
+    }
+
     private void synchronizeServerState(int serverId, serverServices serverStub, Set<String> serverManifest){
-        //TODO: Fazer sistema de comparar arquivos e corrigir inconsistências
+        Map<String, List<Integer>> masterIndex = buildMasterFileIndex();
+
+        Set<String> monitorExpectedFiles = new HashSet<>();
+        
+        for (Map.Entry<String, List<Integer>> entry : masterIndex.entrySet()) {
+            if (entry.getValue().contains(serverId)) {
+                monitorExpectedFiles.add(entry.getKey());
+            }
+        }
+
+        // Encontra arquivos pra apagar
+        Set<String> filesToDelete = new HashSet<>(serverManifest);
+        filesToDelete.removeAll(monitorExpectedFiles);
+
+        if(!filesToDelete.isEmpty()){
+            System.out.println("Servidor " + serverId + " tem " + filesToDelete.size() + " arquivos órfãos. Comandando exclusão...");
+            for (String orphanFile : filesToDelete) {
+                try {
+                    System.out.println("  - Apagando órfão: " + orphanFile);
+                    serverStub.delete(orphanFile);
+                } catch (RemoteException e) {
+                    System.err.println("Falha ao apagar arquivo órfão " + orphanFile + " no servidor " + serverId);
+                }
+            }
+        }
+
+        // Encontra arquivos pra replicar
+        Set<String> filesToReplicate = new HashSet<>(monitorExpectedFiles);
+        filesToReplicate.removeAll(serverManifest);
+        if (!filesToReplicate.isEmpty()) {
+            System.out.println("Servidor " + serverId + " está sem " + filesToReplicate.size() + " arquivos. Iniciando re-replicação...");
+            for (String missingFile : filesToReplicate) {
+                System.out.println("  - Replicando arquivo faltante: " + missingFile);
+                List<Integer> replicas = masterIndex.get(missingFile);
+            
+                // Encontra uma fonte saudável para copiar o arquivo
+                Integer sourceServerId = -1;
+                for (Integer id : replicas) {
+                    if (!id.equals(serverId) && serverStubs.containsKey(id)) {
+                        sourceServerId = id;
+                        break;
+                    }
+                }
+            
+                if (sourceServerId != -1) {
+                    try {
+                        serverServices sourceStub = serverStubs.get(sourceServerId);
+                        sourceStub.copyFileToPeer(missingFile, serverStub);
+                    }
+                    catch (RemoteException e) {
+                        System.err.println("Falha ao iniciar a cópia de " + missingFile + " da fonte " + sourceServerId);
+                    }
+                }
+                else {
+                    System.err.println("ERRO CRÍTICO: Não foi encontrada nenhuma fonte saudável para replicar o arquivo " + missingFile);
+                }
+            }
+        }
+
+        System.out.println("Sincronição do servidor " + serverId + " concluída.");
     }
 
     public void sendHeartbeat(serverInfo status) throws RemoteException {
@@ -161,7 +255,67 @@ public class monitor implements monitorServices, authenticationService {
     }
 
     private void initiateReplicaCorrection(int deadServerId){
-        //TODO: implementar lógica para cópia de réplicas
+        Map<String, List<Integer>> masterIndex = buildMasterFileIndex();
+
+        for(Map.Entry<String, List<Integer>> entry : masterIndex.entrySet()){
+            String physicalPath = entry.getKey();
+            List<Integer> replicaIds = entry.getValue();
+
+            if(replicaIds.contains(deadServerId)){
+
+                List<Integer> healthySourceIds = new ArrayList<>(replicaIds);
+                healthySourceIds.remove(Integer.valueOf(deadServerId));
+
+                if(healthySourceIds.isEmpty()){
+                    System.err.println("Dados perdidos, todas as réplicas deixaram de existir.");
+                    continue;
+                }
+
+                try{
+                    serverServices sourceStub = serverStubs.get(healthySourceIds.get(0));
+
+                    List<Integer> serversToExclude = new ArrayList<>(healthySourceIds);
+                    serversToExclude.add(deadServerId);
+
+                    List<Integer> allPossibleTargetIds = new ArrayList<>(serverStubs.keySet());
+                    allPossibleTargetIds.removeAll(serversToExclude);
+
+                    if(allPossibleTargetIds.isEmpty()){
+                        System.err.println("Não há servidores disponíveis para criar as réplicas");
+                        continue;
+                    }
+
+                    List<serverServices> bestNewServer = selectBestServers(1, allPossibleTargetIds);
+                    serverServices destinantionStub = bestNewServer.get(0);
+                    int destinationId = destinantionStub.getServerID();
+
+                    sourceStub.copyFileToPeer(physicalPath, destinantionStub);
+                    updateReplicaInfo(physicalPath, deadServerId, destinationId);
+                }
+                catch(Exception e){
+                    System.err.println("Falha ao tentar replicar o arquivo.");
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    private void updateReplicaInfo(String physicalPath, int oldId, int newId){
+        String username = physicalPath.substring(0, physicalPath.indexOf('\\'));
+        String logicalPath = physicalPath.substring(physicalPath.indexOf('\\') + 1);
+
+        user aUser = new user(username, "");
+        folder userRoot = loadUserFileSystem(aUser);
+
+        if(userRoot != null){
+            file fileToUpdate = findFileByPath(userRoot, logicalPath);
+            if(fileToUpdate != null){
+                fileToUpdate.getReplicaServerIds().remove(Integer.valueOf(oldId));
+                fileToUpdate.getReplicaServerIds().add(Integer.valueOf(newId));
+                aUser.setRootDir(userRoot);
+                saveUserFileSystem(aUser);
+            }
+        }
     }
 
     @FunctionalInterface
@@ -203,8 +357,6 @@ public class monitor implements monitorServices, authenticationService {
 
             for(file f : currentFolder.getFiles()){
                 f.setParentFolder(currentFolder);
-
-                //System.out.println("[Transient] Arquivo " + f.getFileName() + " foi salvo com o pai " + currentFolder.getFolderName() + ".");
             }
 
             for(folder sub : currentFolder.getSubFolders()){
@@ -238,6 +390,7 @@ public class monitor implements monitorServices, authenticationService {
                 }
             }
             if(nextLevel == null) return null; // Pasta não encontrada
+            currentLevel = nextLevel;
         }
         return currentLevel;
     }
@@ -298,7 +451,7 @@ public class monitor implements monitorServices, authenticationService {
     private void saveUserFileSystem(user aUser){
         try (FileOutputStream fos = new FileOutputStream(PERSISTENCE_FILES + aUser.getUsername() + ".dat"); ObjectOutputStream oos = new ObjectOutputStream(fos)) {
             oos.writeObject(aUser.getRootDir());
-            System.out.println("Registrodo usuário " + aUser.getUsername() + " salvo.");
+            System.out.println("Registro do usuário " + aUser.getUsername() + " salvo.");
         }
         catch(Exception e){
             System.err.println("Erro ao salvar arquivo de estado do usuário");
@@ -385,6 +538,18 @@ public class monitor implements monitorServices, authenticationService {
             // Se já existe uma sessão para este arquivo, é um erro.
             if (uploadSessions.containsKey(fileName)) {
                 throw new RemoteException("Já existe um upload em andamento para o arquivo: " + fileName);
+            }
+
+            String parentPath = "";
+            int lastSeparator = fileName.lastIndexOf('\\');
+            if(lastSeparator > -1){
+                parentPath = fileName.substring(0, lastSeparator);
+            }
+
+            folder destinationFolder = findFolderByPath(aUser.getRootDir(), parentPath);
+
+            if(destinationFolder == null){
+                throw new RemoteException("Diretorio não existe:" + parentPath);
             }
 
             List<serverServices> targetServers = selectBestServers(REPLICATION_FACTOR);
@@ -478,6 +643,7 @@ public class monitor implements monitorServices, authenticationService {
             if(lastSeparator == -1){
                 lastSeparator = fileName.lastIndexOf("/");
             }
+
             if(lastSeparator > -1){
                 parentPath = fileName.substring(0, lastSeparator);
                 justFileName = fileName.substring(lastSeparator + 1);
@@ -539,18 +705,40 @@ public class monitor implements monitorServices, authenticationService {
     }
 
     public boolean isFolder(String filePath, user aUser) throws RemoteException{
-        throw new UnsupportedOperationException("Essa operação ainda não foi feita.");
+        folder foundFolder = findFolderByPath(aUser.getRootDir(), filePath);
+
+        return foundFolder != null;
+    }
+
+    private void recursiveFileSearch(folder currentFolder, String baseFolderPath, List<String> results){
+        for(file f : currentFolder.getFiles()){
+            String fullPath = f.getFilePath();
+            String relativePath = fullPath.substring(baseFolderPath.length() + 1);
+            results.add(relativePath);
+        }
+
+        for(folder sub : currentFolder.getSubFolders()){
+            recursiveFileSearch(sub, baseFolderPath, results);
+        }
     }
 
     public List<String> listFolderFiles(String folderPath, user aUser) throws RemoteException{
-        throw new UnsupportedOperationException("Essa operação ainda não foi feita.");
+        List<String> allFilePaths = new ArrayList<>();
+
+        folder startFolder = findFolderByPath(aUser.getRootDir(), folderPath);
+
+        if(startFolder != null){
+            recursiveFileSearch(startFolder, startFolder.getFolderPath(), allFilePaths);
+        }
+        else{
+            throw new RemoteException("Pasta não encontrada: " + folderPath);
+        }
+
+        return allFilePaths;
     }
 
     public boolean delete(String filePath, user aUser) throws RemoteException{
         file fileToDelete = findFileByPath(aUser.getRootDir(), filePath);
-
-        System.out.println("Path dado:" + filePath);
-        System.out.println("Arquivo encontrado: " + fileToDelete);
 
         if(fileToDelete == null){
             throw new RemoteException("Arquivo nao encontrado.");
@@ -583,65 +771,58 @@ public class monitor implements monitorServices, authenticationService {
         return true;
     }
 
-    public boolean createFolder(String folderPath, user aUser) throws RemoteException{
-        if (folderPath == null || folderPath.trim().isEmpty()) {
-            System.err.println("Tentativa de criar pasta com nome vazio.");
-            return false;
+    public boolean createFolder(String fullLogicalPath, user aUser) throws RemoteException{
+        String parentPath = "";
+        String newFolderName = fullLogicalPath;
+
+        int lastSeparator = fullLogicalPath.replace('/', '\\').lastIndexOf('\\');
+        if (lastSeparator > -1) {
+            parentPath = fullLogicalPath.substring(0, lastSeparator);
+            newFolderName = fullLogicalPath.substring(lastSeparator + 1);
         }
     
-        folder parentFolder = aUser.getRootDir();
-        folder targetFolder = null;
-
-        String[] parts = getPathParts(folderPath);
-
-        for (String part : parts) {
-            if (part.isEmpty()) continue;
-
-            // Procura se a subpasta já existe no nível atual (parentFolder)
-            targetFolder = null;
-            for (folder sub : parentFolder.getSubFolders()) {
-                if (sub.getFolderName().equalsIgnoreCase(part)) {
-                    targetFolder = sub;
-                    break;
-                }
-            }
-
-            // Se a pasta não existe, cria uma nova
-            if (targetFolder == null) {
-                String newPath = parentFolder.getFolderPath().isEmpty() ? part : parentFolder.getFolderPath() + "\\" + part;
-                targetFolder = new folder(part, newPath, parentFolder);
-                parentFolder.addSubFolder(targetFolder);
-                //System.out.println("Pasta lógica criada: " + newPath);
-            }
-            parentFolder = targetFolder;
+        // Encontrar a pasta pai na árvore lógica. A pasta PAI deve existir.
+        folder parentFolder = findFolderByPath(aUser.getRootDir(), parentPath);
+        if (parentFolder == null) {
+            throw new RemoteException("Caminho inválido: a pasta pai '" + parentPath + "' não existe.");
         }
     
-        String finalPathToCreate = aUser.getUsername() + "\\" + targetFolder.getFolderPath();
+        // Verificar se já existe uma pasta com o mesmo nome no destino.
+        for (folder sub : parentFolder.getSubFolders()) {
+            if (sub.getFolderName().equalsIgnoreCase(newFolderName)) {
+                return true; // Se já existe, é considerado sucesso.
+            }
+        }
+    
+        folder newFolder = new folder(newFolderName, fullLogicalPath, parentFolder);
+        parentFolder.addSubFolder(newFolder);
+
+        // Comando para os servidores criarem a pasta física.
+        String physicalPath = aUser.getUsername() + "\\" + fullLogicalPath;
         int successCount = 0;
-
+    
         if (serverStubs.isEmpty()) {
-            System.out.println("Nenhum servidor conectado, criando apenas a pasta lógica.");
-            successCount = 1;
-        }
-        else {
+            successCount = 1; // Permite a criação lógica mesmo sem servidores online
+        } else {
             for (serverServices serverStub : serverStubs.values()) {
                 try {
-                    executeWithRetry(() -> serverStub.createFolder(finalPathToCreate));
+                    executeWithRetry(() -> serverStub.createFolder(physicalPath));
                     successCount++;
                 } catch (Exception e) {
-                    System.err.println("Falha ao criar pasta física em um dos servidores. " + e.getMessage());
+                    System.err.println("Falha ao criar pasta física em um dos servidores: " + e.getMessage());
                 }
             }
-        }
+    }
 
-        if (successCount > 0) {
-            saveUserFileSystem(aUser);
-            return true;
-        }
-        else {
-            System.err.println("ERRO: Nenhum servidor conseguiu criar a pasta física.");
-            return false;
-        }
+    // Se a criação física funcionar, salva o estado
+    if (successCount > 0) {
+        saveUserFileSystem(aUser);
+        return true;
+    } else {
+        // Se nenhum servidor conseguiu criar, a pasta é removida do FS
+        parentFolder.getSubFolders().remove(newFolder);
+        return false;
+    }
     }
 
     public static void main(String[] args){

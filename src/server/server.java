@@ -175,20 +175,20 @@ public class server implements serverServices{
             File fileToDelete = new File(this.rootFolder, relativePath);
 
             if (!fileToDelete.exists()) {
-                System.out.println("[Delete] Arquivo não encontrado para exclusão: " + fileToDelete.getAbsolutePath() + ". Considerado sucesso.");
+                System.out.println("Arquivo não encontrado para exclusão: " + fileToDelete.getAbsolutePath());
                 localFileManifest.remove(relativePath);
                 saveManifest();
                 return true; // Se o arquivo já não existe, a operação teve o efeito desejado.
             }
 
             if (fileToDelete.delete()) {
-                System.out.println("[Delete] Arquivo físico apagado: " + fileToDelete.getAbsolutePath());
+                System.out.println("Arquivo físico apagado: " + fileToDelete.getAbsolutePath());
                 localFileManifest.remove(relativePath);
                 saveManifest();
                 return true;
             }
             else {
-                System.err.println("[Delete] Falha ao apagar o arquivo físico: " + fileToDelete.getAbsolutePath());
+                System.err.println("Falha ao apagar o arquivo físico: " + fileToDelete.getAbsolutePath());
                 return false;
             }
         }
@@ -257,9 +257,8 @@ public class server implements serverServices{
             
             System.setProperty("java.rmi.server.hostname", "26.21.150.179");
             server obj = new server(server_ID);
-            // Porta dinamica para testes na mesma máquina
-            serverServices stub = (serverServices) UnicastRemoteObject.exportObject((obj), 1100 + server_ID); 
-            //Registry registry = LocateRegistry.createRegistry(1099);
+            
+            serverServices stub = (serverServices) UnicastRemoteObject.exportObject((obj), 1100 + server_ID); // Porta dinamica para testes na mesma máquina
             Registry registry = LocateRegistry.getRegistry("26.21.150.179", 1099);
             registry.rebind("server_functions_" + server_ID, stub);
 
