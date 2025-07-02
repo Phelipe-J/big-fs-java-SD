@@ -92,6 +92,7 @@ public class server implements serverServices{
         }
     }
 
+    @SuppressWarnings("unchecked")
     private void loadManifest(){
         File manifestFile = new File(rootFolderPath + MANIFEST_FILE);
         if(manifestFile.exists()){
@@ -146,7 +147,6 @@ public class server implements serverServices{
         }
     }
 
-
     public byte[] download(String filePath, long offset, int blockSize) throws RemoteException{
         try (RandomAccessFile file = new RandomAccessFile(rootFolderPath+filePath, "r")){
             byte[] buffer = new byte[blockSize];
@@ -170,31 +170,51 @@ public class server implements serverServices{
         }
     }
 
-    public boolean delete(String relativePath) throws RemoteException{
+    public boolean delete(String physicalPath) throws RemoteException {
         try {
-            File fileToDelete = new File(this.rootFolder, relativePath);
-
-            if (!fileToDelete.exists()) {
-                System.out.println("Arquivo não encontrado para exclusão: " + fileToDelete.getAbsolutePath());
-                localFileManifest.remove(relativePath);
-                saveManifest();
-                return true; // Se o arquivo já não existe, a operação teve o efeito desejado.
+            File itemToDelete = new File(this.rootFolder, physicalPath);
+            if (!itemToDelete.exists()) {
+                // Se não existe, a operação já está "concluída". Remove do manifest por segurança.
+                this.localFileManifest.remove(physicalPath);
+                this.saveManifest();
+                return true;
             }
 
-            if (fileToDelete.delete()) {
-                System.out.println("Arquivo físico apagado: " + fileToDelete.getAbsolutePath());
-                localFileManifest.remove(relativePath);
-                saveManifest();
+            // Se for um diretório, apaga seu conteúdo primeiro
+            if (itemToDelete.isDirectory()) {
+                deleteDirectoryRecursively(itemToDelete);
+            }
+
+            // Apaga o arquivo ou a pasta agora vazia
+            if (itemToDelete.delete()) {
+                System.out.println("[Delete] Item físico apagado: " + itemToDelete.getAbsolutePath());
+                this.localFileManifest.remove(physicalPath);
+                this.saveManifest();
                 return true;
             }
             else {
-                System.err.println("Falha ao apagar o arquivo físico: " + fileToDelete.getAbsolutePath());
+                System.err.println("[Delete] Falha ao apagar item físico: " + itemToDelete.getAbsolutePath());
                 return false;
             }
         }
         catch (Exception e) {
             e.printStackTrace();
             return false;
+        }
+    }
+
+    private void deleteDirectoryRecursively(File directory) {
+        File[] allContents = directory.listFiles();
+        if (allContents != null) {
+            for (File file : allContents) {
+                // Chama a si mesmo para subdiretórios
+                if (file.isDirectory()) {
+                    deleteDirectoryRecursively(file);
+                }
+                // Apaga o arquivo ou a subpasta agora vazia
+                file.delete();
+                this.localFileManifest.remove(file.getPath());
+            }
         }
     }
 

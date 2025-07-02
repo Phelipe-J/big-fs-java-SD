@@ -2,7 +2,6 @@ package functions;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
-import java.util.List;
 
 public interface serverServices extends Remote {  
     public void beginUpload(String fileName) throws RemoteException;

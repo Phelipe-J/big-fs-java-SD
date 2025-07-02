@@ -434,6 +434,7 @@ public class monitor implements monitorServices, authenticationService {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private void loadUsers(){
         File dbFile = new File(USERS_DB_FILE);
 
@@ -737,34 +738,78 @@ public class monitor implements monitorServices, authenticationService {
         return allFilePaths;
     }
 
-    public boolean delete(String filePath, user aUser) throws RemoteException{
-        file fileToDelete = findFileByPath(aUser.getRootDir(), filePath);
-
-        if(fileToDelete == null){
-            throw new RemoteException("Arquivo nao encontrado.");
+    public boolean delete(String logicalPath, user aUser) throws RemoteException {
+        System.out.println("Usuário '" + aUser.getUsername() + "' solicitou apagar: " + logicalPath);
+    
+        // Verifica se o caminho é um arquivo
+        file fileToDelete = findFileByPath(aUser.getRootDir(), logicalPath);
+        if (fileToDelete != null) {
+            return deleteSingleFile(fileToDelete, aUser);
+        }
+    
+        // Se não for um arquivo, verifica se é uma pasta
+        folder folderToDelete = findFolderByPath(aUser.getRootDir(), logicalPath);
+        if (folderToDelete != null) {
+            return deleteFolderRecursively(folderToDelete, aUser);
         }
 
+        // Se não for nenhum dos dois, o caminho não existe.
+        throw new RemoteException("Caminho não encontrado: " + logicalPath);
+    }
+
+    private boolean deleteSingleFile(file fileToDelete, user aUser) throws RemoteException {
+        String physicalPath = aUser.getUsername() + "\\" + fileToDelete.getFilePath();
         List<Integer> replicaServerIds = fileToDelete.getReplicaServerIds();
-        int sucessCount = 0;
+        int successCount = 0;
 
-        String pathInServer = aUser.getUsername() + "\\" + fileToDelete.getFilePath();
-
-        for(int serverId : replicaServerIds){
+        for (int serverId : replicaServerIds) {
             serverServices serverStub = serverStubs.get(serverId);
-            if(serverStub != null){
-                try{
-                    executeWithRetry(() -> serverStub.delete(pathInServer));
-                    sucessCount++;
+            if (serverStub != null) {
+                try {
+                    executeWithRetry(() -> serverStub.delete(physicalPath));
+                    successCount++;
                 }
-                catch(Exception e){
-                    System.err.println("Falha ao apagar arquivo no servidor [" + serverId + "]." + e.getMessage());
+                catch (Exception e) {
+                    System.err.println("Falha ao apagar arquivo no servidor [" + serverId + "]: " + e.getMessage());
                 }
             }
         }
 
-        if(sucessCount > 0){
-            folder parentFolder = fileToDelete.getParentFolder();
-            parentFolder.getFiles().remove(fileToDelete);
+        if (successCount >= replicaServerIds.size()) {
+            // Remove da árvore lógica
+            fileToDelete.getParentFolder().getFiles().remove(fileToDelete);
+            System.out.println("[Delete] Arquivo '" + fileToDelete.getFileName() + "' removido da árvore lógica.");
+            return true;
+        }
+        return false;
+    }
+
+    private boolean deleteFolderRecursively(folder folderToDelete, user aUser) throws RemoteException {
+        List<folder> subfoldersCopy = new ArrayList<>(folderToDelete.getSubFolders());
+        for (folder sub : subfoldersCopy) {
+            deleteFolderRecursively(sub, aUser);
+        }
+        
+        List<file> filesCopy = new ArrayList<>(folderToDelete.getFiles());
+        for (file f : filesCopy) {
+            deleteSingleFile(f, aUser);
+        }
+        
+        String physicalPath = aUser.getUsername() + "\\" + folderToDelete.getFolderPath();
+        System.out.println("[Delete] Comandando servidores para apagar o diretório físico: " + physicalPath);
+        for(serverServices server : serverStubs.values()){
+            try{
+                server.delete(physicalPath);
+            }
+            catch(RemoteException e) {
+                // Faz nada
+            }
+        }
+        
+        // Remove pasta lógica
+        if (folderToDelete.getParentFolder() != null) {
+            folderToDelete.getParentFolder().getSubFolders().remove(folderToDelete);
+            System.out.println("[Delete] Pasta '" + folderToDelete.getFolderName() + "' removida da árvore lógica.");
         }
 
         saveUserFileSystem(aUser);

@@ -31,8 +31,6 @@ public class client {
             String[] addressPath = sourcePath.split(":\\\\");   // Separa a raiz do resto do endereço
 
             if(addressPath[0].equals("remote")){            // Checa se é a raiz remota
-                String remotefilePath = (addressPath.length > 1) ? addressPath[1]: "";
-
                 if(stub.isFolder(sourcePath)){
                     downloadFolder(stub, sourcePath, destinationPath);
                     return;
@@ -41,10 +39,6 @@ public class client {
                 download(stub, sourcePath, localFilePath);
                 return;
             }
-
-            String[] remotePath = destinationPath.split(":\\\\", -1);       // Separa a raiz do resto do endereço
-
-            //String remoteDestination = (remotePath.length > 1) ? remotePath[1] : "";
 
             File file = new File(sourcePath);
             if(file.isDirectory()){
@@ -403,6 +397,8 @@ public class client {
             }
 
             mainLoop(userSessionStub);
+
+            input.close();
         }
         catch(Exception e){
             System.err.println("Erro de conexão com o servidor: + " + e.getMessage());
