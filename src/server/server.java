@@ -63,7 +63,9 @@ public class server implements serverServices{
                 long freeSpace = rootDir.getFreeSpace();
                 long usedSpace = totalSpace - freeSpace;
 
-                float workload = 0.0f; // Placeholder for workload calculation
+                int activeUploads = fileOutStreams.size();
+
+                float workload = Math.min(1.0f, activeUploads / 15);
 
                 serverInfo status = new serverInfo(server_ID, totalSpace, usedSpace, workload);
                 status.setLastHeartbeatTimestamp(System.currentTimeMillis());
